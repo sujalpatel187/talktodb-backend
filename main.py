@@ -6,6 +6,7 @@ from app.routes import chat
 from app.routes import qdrant
 from app.routes import training
 from app.routes import collection
+from app.routes import execute
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,6 +60,7 @@ app.include_router(chat.router)
 app.include_router(qdrant.router)
 app.include_router(training.router)
 app.include_router(collection.router)
+app.include_router(execute.router)
 
 
 @app.get("/")

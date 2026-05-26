@@ -6,3 +6,4 @@ pydantic-settings==2.8.1
 qdrant-client==1.13.3
 sentence-transformers==3.4.1
 httpx==0.28.1
+psycopg2-binary==2.9.10

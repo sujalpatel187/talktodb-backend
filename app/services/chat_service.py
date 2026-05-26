@@ -7,6 +7,7 @@ from app.services.qdrant_service import search_similar, search_ddl, search_docs
 from app.services.llm_service import call_llm, _load_system_prompt
 from app.services.sql_validator import validate_sql
 from app.services.input_sanitizer import sanitize_user_message
+from app.services.pg_service import execute_query
 from app.schemas.chat_schema import ChatResponse
 
 logger = logging.getLogger(__name__)
@@ -140,8 +141,65 @@ def run_chat_pipeline(user_message: str) -> ChatResponse:
         logger.warning("SQL validation failed: %s", error_msg)
         return ChatResponse(userMessage=user_message, error=error_msg)
 
-    # Step 6: Build response
-    return ChatResponse(
-        userMessage=user_message,
-        generatedSQL=generated_sql.strip(),
+    # Step 6: Execute SQL against PostgreSQL
+    db_result = execute_query(generated_sql.strip())
+
+    if db_result["error"]:
+        logger.warning("SQL execution error: %s", db_result["error"])
+        return ChatResponse(
+            userMessage=f"Database execution failed: {db_result['error']}",
+            generatedSQL=generated_sql.strip(),
+            error=db_result["error"],
+        )
+
+    logger.info(
+        "Query executed: %d rows, %d columns.",
+        len(db_result["rows"]),
+        len(db_result["columns"]),
     )
+
+    # Step 7: Generate conversational NL summary
+    summary = _generate_data_summary(
+        question=user_message,
+        sql=generated_sql.strip(),
+        columns=db_result["columns"],
+        rows=db_result["rows"],
+    )
+
+    # Step 8: Build response
+    return ChatResponse(
+        userMessage=summary,
+        generatedSQL=generated_sql.strip(),
+        columns=db_result["columns"],
+        rows=db_result["rows"],
+        rowCount=db_result["row_count"],
+    )
+
+
+def _generate_data_summary(question: str, sql: str, columns: list, rows: list) -> str:
+    """Use the LLM to generate a natural language summary of the PostgreSQL query results."""
+    if not rows:
+        return "The query executed successfully but returned 0 results."
+        
+    sample_rows = rows[:20]
+    summary_prompt = (
+        "You are an expert conversational BI and database assistant.\n"
+        f"The user asked: {question}\n"
+        f"The system generated this SQL query to retrieve the answer:\n{sql}\n\n"
+        "The database returned these results:\n"
+        f"Columns: {columns}\n"
+        f"Rows (showing first {len(sample_rows)} rows out of {len(rows)} total rows):\n"
+        f"{sample_rows}\n\n"
+        "Task:\n"
+        "Provide a concise, conversational, and direct natural language summary answering the user's question based strictly on the retrieved database results.\n"
+        "Rules:\n"
+        "- Do not mention SQL syntax, table names, or technical code details.\n"
+        "- Keep it simple, clear, and professional.\n"
+        "- Be brief (2 to 4 sentences max)."
+    )
+    try:
+        summary = call_llm([{"role": "user", "content": summary_prompt}])
+        return summary.strip()
+    except Exception as e:
+        logger.error("Failed to generate data summary: %s", str(e))
+        return "Query executed successfully. Below are the results from your database:"

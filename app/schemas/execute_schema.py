@@ -2,13 +2,11 @@ from pydantic import BaseModel
 from typing import Any
 
 
-class ChatRequest(BaseModel):
-    userMessage: str
+class ExecuteRequest(BaseModel):
+    sql: str
 
 
-class ChatResponse(BaseModel):
-    userMessage: str
-    generatedSQL: str | None = None
+class ExecuteResponse(BaseModel):
     columns: list[str] = []
     rows: list[list[Any]] = []
     rowCount: int = 0

@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     temperature: float
     max_tokens: int
 
+    # PostgreSQL — REQUIRED for /execute
+    pg_host: str
+    pg_port: int = 5432
+    pg_database: str
+    pg_user: str
+    pg_password: str
+
     class Config:
         env_file = ".env"
 
