@@ -1,273 +1,281 @@
 # TalkToDB — Backend API
 
-A FastAPI backend that converts natural language questions into SQL queries using semantic search (Qdrant) and a large language model (vLLM).
+<p align="center">
+  <img src="https://img.shields.io/badge/FastAPI-0.115.12-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/Qdrant-1.13.3-FF007F?style=for-the-badge&logo=qdrant&logoColor=white" alt="Qdrant" />
+  <img src="https://img.shields.io/badge/PostgreSQL-15+-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+</p>
+
+A state-of-the-art FastAPI backend designed to translate natural language user questions into safe, optimized SQL queries and execute them against a PostgreSQL database. It leverages semantic search over schemas and documentation via **Qdrant** and advanced text generation using an OpenAI-compatible large language model (e.g., vLLM, Ollama).
 
 ---
 
-## How It Works
+## 🛠️ Architecture & Pipeline Flow
+
+The backend employs a defense-in-depth pipeline to ensure that only valid, safe queries are processed and executed.
 
 ```
-User Question
-     │
-     ▼
-[Input Sanitizer]       — rejects SQL, JSON, code input
-     │
-     ▼
-[Embedding Service]     — all-MiniLM-L6-v2 → 384-dim vector
-     │
-     ├──▶ [Qdrant: Q&A Collection]    top-5 similar question-SQL pairs
-     ├──▶ [Qdrant: DDL Collection]    top-5 relevant table schemas
-     └──▶ [Qdrant: Docs Collection]   top-5 relevant documentation chunks
-              │
-              ▼
-        [LLM Service]                 system prompt + all context → SQL
-              │
-              ▼
-        [SQL Validator]               rejects non-SELECT queries
-              │
-              ▼
-        JSON Response  { userMessage, generatedSQL }
+                  User Question
+                       │
+                       ▼
+            ┌──────────────────────┐
+            │   Input Sanitizer    │  ◄── Rejects SQL, JSON, code injections
+            └──────────┬───────────┘
+                       │
+                       ▼
+            ┌──────────────────────┐
+            │  Embedding Service   │  ◄── Embeds text (all-MiniLM-L6-v2)
+            └──────────┬───────────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+     ┌──────────┐ ┌──────────┐ ┌──────────┐
+     │  Qdrant  │ │  Qdrant  │ │  Qdrant  │
+     │  (Q&As)  │ │  (DDLs)  │ │  (Docs)  │
+     └────┬─────┘ └────┬─────┘ └────┬─────┘
+          │            │            │
+          └────────────┼────────────┘
+                       │ (Context Ingestion)
+                       ▼
+            ┌──────────────────────┐
+            │   LLM Generation     │  ◄── Generates optimized SQL query
+            └──────────┬───────────┘
+                       │
+                       ▼
+            ┌──────────────────────┐
+            │    SQL Validator     │  ◄── Enforces SELECT-only validation
+            └──────────┬───────────┘
+                       │
+                       ▼
+            ┌──────────────────────┐
+            │ PostgreSQL Execution │  ◄── Read-only transactional environment
+            └──────────┬───────────┘
+                       │
+                       ▼
+                 JSON Response
+     { columns, rows, generatedSQL, error }
 ```
 
 ---
 
-## Project Structure
+## 📂 Project Structure
 
 ```
 backend/
-├── main.py                         # App entry point, lifespan preloading
-├── requirements.txt
-├── .env                            # All config (never commit this)
-├── .env.example                    # Template for env variables
+├── main.py                         # Application entrypoint & startup preloading
+├── requirements.txt                # Python dependencies
+├── .env                            # Local configuration (Ignored by Git)
+├── .env.example                    # Template for environment settings
 │
 ├── app/
-│   ├── config.py                   # Pydantic settings — reads from .env
+│   ├── config.py                   # Pydantic Settings management
 │   │
 │   ├── prompts/
-│   │   └── system_prompt.txt       # System prompt sent to LLM on every request
+│   │   └── system_prompt.txt       # System prompt loaded fresh for every request
 │   │
 │   ├── routes/
-│   │   ├── chat.py                 # POST /chat/
-│   │   ├── qdrant.py               # GET  /qdrant/search
-│   │   ├── training.py             # POST /train/*
-│   │   └── collection.py           # GET/PUT/DELETE /collection/*
+│   │   ├── chat.py                 # POST /chat/ - Core orchestration endpoint
+│   │   ├── qdrant.py               # GET  /qdrant/search - Vector search debugging
+│   │   ├── training.py             # POST /train/* - Training data ingestion
+│   │   └── collection.py           # GET/PUT/DELETE /collection/* - Data management
 │   │
 │   ├── schemas/
-│   │   ├── chat_schema.py
+│   │   ├── chat_schema.py          # Request and response Pydantic schemas
 │   │   ├── qdrant_schema.py
 │   │   ├── training_schema.py
 │   │   └── collection_schema.py
 │   │
 │   └── services/
-│       ├── chat_service.py         # Full pipeline orchestration
-│       ├── embedding_service.py    # SentenceTransformer wrapper
-│       ├── qdrant_service.py       # All Qdrant operations
-│       ├── llm_service.py          # vLLM / OpenAI-compatible call
-│       ├── sql_validator.py        # Ensures only SELECT queries pass
-│       └── input_sanitizer.py      # Blocks SQL/JSON/code input
+│       ├── chat_service.py         # Main pipeline flow coordinator
+│       ├── embedding_service.py    # SentenceTransformers vector generation
+│       ├── qdrant_service.py       # Vector DB interaction
+│       ├── llm_service.py          # OpenAI-compatible API connector
+│       ├── pg_service.py           # PostgreSQL transactional query execution
+│       ├── sql_validator.py        # Strict AST/regex-based SQL checks
+│       └── input_sanitizer.py      # Input sanitation & prompt defense
 │
-└── logs/                           # Auto-created. Full LLM prompt saved per request.
+└── logs/                           # Auto-generated full-prompt audit trail per request
 ```
 
 ---
 
-## Qdrant Collections
+## 🗄️ Qdrant Collections
 
-| Collection | Purpose | Payload Fields |
-|------------|---------|----------------|
-| `your_question_sql_collection` | Similar Q&A pairs | `question`, `sql`, `timestamp` |
-| `your_ddl_collection` | Table schemas | `table_name`, `ddl`, `description`, `type`, `timestamp` |
-| `your_docs_collection` | Documentation | `content`, `category`, `type`, `timestamp` |
+Three dedicated collections store semantic context within the vector database:
+
+| Collection Name | Purpose | Key Payload Fields |
+|:---|:---|:---|
+| `your_question_sql_collection` | Stores verified Question-to-SQL pairs for few-shot learning examples. | `question`, `sql`, `timestamp` |
+| `your_ddl_collection` | Contains the physical and logical database schemas (DDL statements). | `table_name`, `ddl`, `description`, `type`, `timestamp` |
+| `your_docs_collection` | Holds supplemental text documentation, database dictionaries, or glossaries. | `content`, `category`, `type`, `timestamp` |
 
 ---
 
-## Setup
+## 🛡️ Security & Guardrails
 
-### 1. Clone & create virtual environment
+To prevent malicious activities, SQL injection, and database alteration, the backend implements multiple layers of protection:
+
+1. **Input Sanitizer**: Blocks inputs that look like direct SQL statements, structured JSON, code blocks (`import`, `def`, `function`), or values outside of the 3–500 character limits.
+2. **SQL Validator**: Analyzes generated SQL and strictly rejects anything that is not a pure `SELECT` statement.
+3. **Database Guardrails**:
+   - Connection established explicitly in **Read-Only Mode** (`conn.set_session(readonly=True, autocommit=False)`).
+   - Strict statement timeouts (`statement_timeout = 30000ms`) to protect against resource starvation from runaway Cartesian products.
+   - Result limit capped at **500 rows** to avoid memory overload.
+
+---
+
+## 🚀 Getting Started
+
+### 1. Prerequisite Checklist
+- **Python 3.10** or higher installed.
+- Running instance of **Qdrant Vector Database**.
+- Access to a **PostgreSQL Database** (read-only credentials recommended).
+- Access to an **OpenAI-compatible LLM provider** (vLLM, Ollama, OpenAI).
+
+### 2. Install & Configure
+
+Clone the repository, initialize your virtual environment, and install dependencies:
+
 ```bash
+# Initialize and activate virtual environment
 python -m venv venv
-venv\Scripts\activate        # Windows
-source venv/bin/activate     # Linux/Mac
-```
+venv\Scripts\activate        # Windows PowerShell/CMD
+source venv/bin/activate     # Linux/macOS
 
-### 2. Install dependencies
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment
-Copy `.env.example` to `.env` and fill in all values:
+### 3. Setup Environment Variables
+
+Copy `.env.example` to `.env` and fill in all variables:
+
 ```bash
 cp .env.example .env
 ```
 
 ```env
+# Application
 DEBUG=False
 
-QDRANT_URL=http://<qdrant-host>:<port>
-QDRANT_COLLECTION_NAME=<your_question_sql_collection>
-QDRANT_DDL_COLLECTION_NAME=<your_ddl_collection>
-QDRANT_DOCS_COLLECTION_NAME=<your_docs_collection>
+# Qdrant Vector DB
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION_NAME=your_question_sql_collection
+QDRANT_DDL_COLLECTION_NAME=your_ddl_collection
+QDRANT_DOCS_COLLECTION_NAME=your_docs_collection
 QDRANT_API_KEY=
 
+# Embedding Model settings
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 EMBEDDING_DIMENSION=384
 
-OLLAMA_URL=http://<llm-host>:<port>/v1/chat/completions
-MODEL_NAME=<your-model-id>
+# LLM Configurations
+OLLAMA_URL=http://localhost:11434/v1/chat/completions
+MODEL_NAME=deepseek-coder:6.7b
 LLM_API_KEY=
-TEMPERATURE=0.7
+TEMPERATURE=0.0
 MAX_TOKENS=2048
+
+# PostgreSQL Target Database
+PG_HOST=localhost
+PG_PORT=5432
+PG_DATABASE=my_production_db
+PG_USER=talktodb_readonly
+PG_PASSWORD=secure_password_here
 ```
 
-> All variables are **required**. Missing any will log an error and stop startup.
+> [!IMPORTANT]
+> A temperature of `0.0` is highly recommended for SQL generation to guarantee deterministic, exact output.
 
-### 4. Run development server
-```bash
-uvicorn main:app --reload
-```
+### 4. Running the Servers
 
-### 5. Run production server
-```bash
-gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
-```
+* **Development Server (with hot reload):**
+  ```bash
+  uvicorn main:app --reload
+  ```
 
-API docs available at: `http://localhost:8000/docs`
+* **Production Server (multi-worker Gunicorn):**
+  ```bash
+  gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+  ```
+
+Interactive API documentation is automatically generated and accessible at:
+- Swagger UI: `http://localhost:8000/docs`
+- Redoc: `http://localhost:8000/redoc`
 
 ---
 
-## API Reference
+## 📡 API Reference
 
-### Chat
+### 1. Chat Orchestration
+* **Endpoint:** `POST /chat/`
+* **Request Payload:**
+  ```json
+  {
+    "userMessage": "List all branches with more than 50 employees."
+  }
+  ```
+* **Response Payload:**
+  ```json
+  {
+    "userMessage": "List all branches with more than 50 employees.",
+    "generatedSQL": "SELECT branch_name, COUNT(*) FROM ...",
+    "columns": ["branch_name", "employee_count"],
+    "rows": [
+      ["Bengaluru Central", 84],
+      ["Hubli North", 52]
+    ],
+    "row_count": 2,
+    "error": null
+  }
+  ```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/chat/` | Convert natural language to SQL |
+### 2. Knowledge Ingestion (Training)
+Upload context and schema representations into the semantic indexes:
 
-**Request:**
-```json
-{ "userMessage": "How many PACS are in Karnataka?" }
-```
-**Response:**
-```json
-{
-  "userMessage": "How many PACS are in Karnataka?",
-  "generatedSQL": "SELECT COUNT(*) FROM ...",
-  "error": null
-}
-```
+| Method | Endpoint | Ingested Object |
+| :--- | :--- | :--- |
+| `POST` | `/train/question-sql` | Single Q&A Example |
+| `POST` | `/train/question-sql/bulk` | Multiple Q&A Examples |
+| `POST` | `/train/ddl` | Single Table DDL Schema |
+| `POST` | `/train/ddl/bulk` | Multiple Table DDL Schemas |
+| `POST` | `/train/docs` | Documentation Text Snippet |
+| `POST` | `/train/docs/bulk` | Multiple Documentation Snippets |
 
----
-
-### Qdrant Search
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/qdrant/search?question=...` | Top 5 similar Q&A from collection |
-
----
-
-### Training — Add data to collections
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/train/question-sql` | Single Q&A pair |
-| `POST` | `/train/question-sql/bulk` | Bulk Q&A pairs |
-| `POST` | `/train/ddl` | Single DDL record |
-| `POST` | `/train/ddl/bulk` | Bulk DDL records |
-| `POST` | `/train/docs` | Single documentation record |
-| `POST` | `/train/docs/bulk` | Bulk documentation records |
-
-**Bulk Q&A example:**
-```json
-{
-  "records": [
-    { "question": "Total PACS count", "sql": "SELECT COUNT(*) FROM ..." },
-    { "question": "State-wise PACS",  "sql": "SELECT state_name, COUNT(*) FROM ..." }
-  ]
-}
-```
+### 3. Collection Management
+Explore or edit your vectorized data programmatically:
+- `GET /collection/{type}` — List all vectorized data points of `{type}` (`question-sql`, `ddl`, `docs`).
+- `PUT /collection/{type}/{id}` — Update specific vectorized details.
+- `DELETE /collection/{type}/{id}` — Delete outdated data from Qdrant.
 
 ---
 
-### Collection Management
+## 🗒️ Logging & Prompt Audits
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/collection/question-sql` | List all Q&A points |
-| `PUT` | `/collection/question-sql/{id}` | Update Q&A point |
-| `DELETE` | `/collection/question-sql/{id}` | Delete Q&A point |
-| `GET` | `/collection/ddl` | List all DDL points |
-| `PUT` | `/collection/ddl/{id}` | Update DDL point |
-| `DELETE` | `/collection/ddl/{id}` | Delete DDL point |
-| `GET` | `/collection/docs` | List all docs points |
-| `PUT` | `/collection/docs/{id}` | Update docs point |
-| `DELETE` | `/collection/docs/{id}` | Delete docs point |
+For every processed `/chat/` query, the application saves the fully compiled prompt sent to the LLM inside the `logs/` folder. This is useful for auditing, fine-tuning, and prompt engineering:
 
----
-
-## Customizing the LLM Behavior
-
-Edit [app/prompts/system_prompt.txt](app/prompts/system_prompt.txt) to change how the LLM responds. This file is loaded fresh on every request — no restart needed.
-
----
-
-## Logs
-
-Every `/chat/` request saves a `.txt` file in `logs/` with the **full prompt** sent to the LLM:
-
-```
-logs/
-└── 20260513_154446_How_many_PACS_are_in_Karnataka.txt
-```
-
-Each file contains:
+File naming pattern: `logs/YYYYMMDD_HHMMSS_user_question.txt`
 ```
 ==== SYSTEM PROMPT ====
-...
+You are a highly precise PostgreSQL specialist...
 
 ==== USER PROMPT ====
 ### Database Schema (DDL):
-...
+CREATE TABLE branches (...);
 
 ### Documentation Context:
-...
+Karnataka consists of 30 distinct districts...
 
 ### Similar Question-SQL Examples:
-...
+Q: What is the total branch count? -> A: SELECT COUNT(*) FROM branches;
 
 ### Task:
-Generate a SQL query for: <userMessage>
+Generate a SQL query for: List all branches with more than 50 employees.
 ```
 
 ---
 
-## Input Validation
+## 🎨 System Prompt Tuning
 
-The `/chat/` endpoint rejects:
-- SQL queries (`SELECT`, `INSERT`, `UPDATE`, etc.)
-- JSON objects/arrays
-- Code snippets (`import`, `def`, `function`, etc.)
-- Messages shorter than 3 characters or longer than 500 characters
-
-The generated SQL is also validated — only `SELECT` statements are returned. Any other operation returns an error in the response.
-
----
-
-## Environment Variables Reference
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DEBUG` | No | Enables debug mode (default: False) |
-| `QDRANT_URL` | ✅ | Qdrant server URL |
-| `QDRANT_COLLECTION_NAME` | ✅ | Q&A collection name |
-| `QDRANT_DDL_COLLECTION_NAME` | ✅ | DDL collection name |
-| `QDRANT_DOCS_COLLECTION_NAME` | ✅ | Docs collection name |
-| `QDRANT_API_KEY` | No | Qdrant API key (if enabled) |
-| `EMBEDDING_MODEL` | ✅ | SentenceTransformer model name |
-| `EMBEDDING_DIMENSION` | ✅ | Embedding vector dimension |
-| `OLLAMA_URL` | ✅ | vLLM chat completions endpoint |
-| `MODEL_NAME` | ✅ | Model ID used for generation |
-| `LLM_API_KEY` | No | Bearer token for LLM (if required) |
-| `TEMPERATURE` | ✅ | LLM temperature (0.0–1.0) |
-| `MAX_TOKENS` | ✅ | Max tokens in LLM response |
+Modify [app/prompts/system_prompt.txt](app/prompts/system_prompt.txt) to adapt the LLM's query generation style. This file is read **dynamically on every request**, enabling on-the-fly tuning without restarting the server!
