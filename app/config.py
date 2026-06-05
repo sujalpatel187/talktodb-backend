@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     embedding_model: str
     embedding_dimension: int
 
+    # Re-ranking — optional (falls back to BAAI/bge-reranker-base if not set)
+    reranker_model: str = "BAAI/bge-reranker-base"
+
     # LLM — REQUIRED
     ollama_url: str
     model_name: str

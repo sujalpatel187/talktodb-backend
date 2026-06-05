@@ -51,3 +51,43 @@ def call_llm(
         response.raise_for_status()
 
     return response.json()["choices"][0]["message"]["content"]
+
+
+def call_llm_summary(
+    messages: List[Dict[str, str]],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """
+    Call the LLM without injecting the system prompt.
+
+    Intended for summary / post-processing tasks where the SQL-generation
+    system prompt is irrelevant and would waste tokens.
+
+    Args:
+        messages:    List of message dicts sent as-is to the API.
+        temperature: Override default temperature from env.
+        max_tokens:  Override default max_tokens from env.
+
+    Returns:
+        The assistant's reply as a plain string.
+
+    Raises:
+        httpx.HTTPStatusError: If the API returns a non-2xx response.
+    """
+    headers = {"Content-Type": "application/json"}
+    if settings.llm_api_key:
+        headers["Authorization"] = f"Bearer {settings.llm_api_key}"
+
+    payload = {
+        "model": settings.model_name,
+        "messages": messages,
+        "temperature": temperature if temperature is not None else settings.temperature,
+        "max_tokens": max_tokens if max_tokens is not None else settings.max_tokens,
+    }
+
+    with httpx.Client(timeout=120) as client:
+        response = client.post(settings.ollama_url, headers=headers, json=payload)
+        response.raise_for_status()
+
+    return response.json()["choices"][0]["message"]["content"]

@@ -5,9 +5,10 @@
   <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/Qdrant-1.13.3-FF007F?style=for-the-badge&logo=qdrant&logoColor=white" alt="Qdrant" />
   <img src="https://img.shields.io/badge/PostgreSQL-15+-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/CrossEncoder-BAAI%2Fbge--reranker--base-FF6B35?style=for-the-badge&logo=huggingface&logoColor=white" alt="CrossEncoder" />
 </p>
 
-A state-of-the-art FastAPI backend designed to translate natural language user questions into safe, optimized SQL queries and execute them against a PostgreSQL database. It leverages semantic search over schemas and documentation via **Qdrant** and advanced text generation using an OpenAI-compatible large language model (e.g., vLLM, Ollama).
+A state-of-the-art FastAPI backend designed to translate natural language user questions into safe, optimized SQL queries and execute them against a PostgreSQL database. It leverages semantic search over schemas and documentation via **Qdrant**, a **Cross-Encoder re-ranking stage** for retrieval precision, and advanced text generation using an OpenAI-compatible large language model (e.g., vLLM, Ollama).
 
 ---
 
@@ -25,18 +26,24 @@ The backend employs a defense-in-depth pipeline to ensure that only valid, safe 
                        │
                        ▼
             ┌──────────────────────┐
-            │  Embedding Service   │  ◄── Embeds text (all-MiniLM-L6-v2)
+            │  Embedding Service   │  ◄── Bi-encoder (all-MiniLM-L6-v2)
             └──────────┬───────────┘
                        │
           ┌────────────┼────────────┐
           ▼            ▼            ▼
      ┌──────────┐ ┌──────────┐ ┌──────────┐
      │  Qdrant  │ │  Qdrant  │ │  Qdrant  │
-     │  (Q&As)  │ │  (DDLs)  │ │  (Docs)  │
+     │ (Q&A×50) │ │ (DDL×10) │ │ (Doc×10) │
      └────┬─────┘ └────┬─────┘ └────┬─────┘
           │            │            │
           └────────────┼────────────┘
-                       │ (Context Ingestion)
+                       │  70 candidates total
+                       ▼
+            ┌──────────────────────┐
+            │  Cross-Encoder       │  ◄── BAAI/bge-reranker-base
+            │  Re-Ranker           │      scores all pairs, returns top 10
+            └──────────┬───────────┘
+                       │
                        ▼
             ┌──────────────────────┐
             │   LLM Generation     │  ◄── Generates optimized SQL query
@@ -53,8 +60,13 @@ The backend employs a defense-in-depth pipeline to ensure that only valid, safe 
             └──────────┬───────────┘
                        │
                        ▼
+            ┌──────────────────────┐
+            │   NL Summary (LLM)   │  ◄── No system prompt, summary only
+            └──────────┬───────────┘
+                       │
+                       ▼
                  JSON Response
-     { columns, rows, generatedSQL, error }
+     { columns, rows, generatedSQL, userMessage, error }
 ```
 
 ---
@@ -65,6 +77,7 @@ The backend employs a defense-in-depth pipeline to ensure that only valid, safe 
 backend/
 ├── main.py                         # Application entrypoint & startup preloading
 ├── requirements.txt                # Python dependencies
+├── RERANKER.md                     # Re-ranking deep-dive documentation
 ├── .env                            # Local configuration (Ignored by Git)
 ├── .env.example                    # Template for environment settings
 │
@@ -88,14 +101,17 @@ backend/
 │   │
 │   └── services/
 │       ├── chat_service.py         # Main pipeline flow coordinator
-│       ├── embedding_service.py    # SentenceTransformers vector generation
+│       ├── embedding_service.py    # SentenceTransformers bi-encoder (all-MiniLM-L6-v2)
+│       ├── reranker_service.py     # Cross-encoder re-ranking (BAAI/bge-reranker-base)
 │       ├── qdrant_service.py       # Vector DB interaction
 │       ├── llm_service.py          # OpenAI-compatible API connector
 │       ├── pg_service.py           # PostgreSQL transactional query execution
 │       ├── sql_validator.py        # Strict AST/regex-based SQL checks
 │       └── input_sanitizer.py      # Input sanitation & prompt defense
 │
-└── logs/                           # Auto-generated full-prompt audit trail per request
+└── logs/                           # Auto-generated audit trail per request
+    ├── YYYYMMDD_HHMMSS_question.txt                   # System + LLM prompt log
+    └── YYYYMMDD_HHMMSS_question_retrieval_debug.txt   # Full retrieval debug log
 ```
 
 ---
@@ -104,15 +120,38 @@ backend/
 
 Three dedicated collections store semantic context within the vector database:
 
-| Collection Name | Purpose | Key Payload Fields |
-|:---|:---|:---|
-| `your_question_sql_collection` | Stores verified Question-to-SQL pairs for few-shot learning examples. | `question`, `sql`, `timestamp` |
-| `your_ddl_collection` | Contains the physical and logical database schemas (DDL statements). | `table_name`, `ddl`, `description`, `type`, `timestamp` |
-| `your_docs_collection` | Holds supplemental text documentation, database dictionaries, or glossaries. | `content`, `category`, `type`, `timestamp` |
+| Collection Name | Purpose | Candidates Retrieved | Key Payload Fields |
+|:---|:---|:---|:---|
+| `your_question_sql_collection` | Verified Question-to-SQL pairs for few-shot examples | 50 | `question`, `sql`, `timestamp` |
+| `your_ddl_collection` | Physical and logical database schemas (DDL statements) | 10 | `table_name`, `ddl`, `description`, `type`, `timestamp` |
+| `your_docs_collection` | Supplemental text documentation, data dictionaries, glossaries | 10 | `content`, `category`, `type`, `timestamp` |
+
+All 70 candidates are passed together to the **Cross-Encoder Re-Ranker**, which returns the top-10 most relevant results across all collections.
 
 ---
 
-## 🛡️ Security & Guardrails
+## � Cross-Encoder Re-Ranking
+
+After Qdrant retrieval, all candidates are re-scored using a **Cross-Encoder** model that reads the query and each document together — producing a much more accurate relevance score than cosine similarity alone.
+
+| Property | Value |
+|:---|:---|
+| Primary model | `BAAI/bge-reranker-base` |
+| Fallback model | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| Input token limit | 512 |
+| Batch size | 64 pairs per forward pass |
+| Candidates in | 70 (50 QA + 10 DDL + 10 Docs) |
+| Results out | top 10 across all collections |
+
+The model is loaded **once at startup** and cached for the lifetime of the process. Override the model via `.env`:
+
+```env
+RERANKER_MODEL=BAAI/bge-reranker-base
+```
+
+> See [RERANKER.md](RERANKER.md) for full technical documentation.
+
+---
 
 To prevent malicious activities, SQL injection, and database alteration, the backend implements multiple layers of protection:
 
@@ -169,6 +208,9 @@ QDRANT_API_KEY=
 # Embedding Model settings
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 EMBEDDING_DIMENSION=384
+
+# Re-Ranking Model (optional — defaults to BAAI/bge-reranker-base)
+RERANKER_MODEL=BAAI/bge-reranker-base
 
 # LLM Configurations
 OLLAMA_URL=http://localhost:11434/v1/chat/completions
@@ -253,26 +295,36 @@ Explore or edit your vectorized data programmatically:
 
 ## 🗒️ Logging & Prompt Audits
 
-For every processed `/chat/` query, the application saves the fully compiled prompt sent to the LLM inside the `logs/` folder. This is useful for auditing, fine-tuning, and prompt engineering:
+For every processed `/chat/` query, two debug files are saved in the `logs/` folder.
 
-File naming pattern: `logs/YYYYMMDD_HHMMSS_user_question.txt`
+### Prompt Log — `YYYYMMDD_HHMMSS_question.txt`
 ```
 ==== SYSTEM PROMPT ====
 You are a highly precise PostgreSQL specialist...
 
 ==== USER PROMPT ====
-### Database Schema (DDL):
-CREATE TABLE branches (...);
-
-### Documentation Context:
-Karnataka consists of 30 distinct districts...
+Question: List all branches with more than 50 employees.
 
 ### Similar Question-SQL Examples:
-Q: What is the total branch count? -> A: SELECT COUNT(*) FROM branches;
+...
 
-### Task:
-Generate a SQL query for: List all branches with more than 50 employees.
+### Documentation Context:
+...
+
+### Database Schema (DDL):
+...
 ```
+
+### Retrieval Debug Log — `YYYYMMDD_HHMMSS_question_retrieval_debug.txt`
+
+| Section | Contents |
+|:---|:---|
+| 1 — Raw QA | All 50 Qdrant QA candidates with cosine score, question, SQL |
+| 2 — Raw DDL | All 10 Qdrant DDL candidates with cosine score, table, DDL |
+| 3 — Raw Docs | All 10 Qdrant Docs candidates with cosine score, category, content |
+| 4 — Re-ranked QA | QA hits that survived re-ranking, with cross-encoder score |
+| 5 — Re-ranked DDL | DDL hits that survived re-ranking, with cross-encoder score |
+| 6 — Re-ranked Docs | Docs hits that survived re-ranking, with cross-encoder score |
 
 ---
 

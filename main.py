@@ -32,6 +32,11 @@ async def lifespan(app: FastAPI):
     get_client()
     logger.info("Qdrant client connected successfully.")
 
+    logger.info("Loading re-ranker model...")
+    from app.services.reranker_service import get_reranker
+    get_reranker()
+    logger.info("Re-ranker model loaded successfully.")
+
     logger.info("=== Service Preloading Complete — Ready to serve ===")
 
     yield

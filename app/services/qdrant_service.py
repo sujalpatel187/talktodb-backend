@@ -1,4 +1,5 @@
 import uuid
+import warnings
 from datetime import datetime, timezone
 from qdrant_client import QdrantClient
 from qdrant_client.models import ScoredPoint, PointStruct, Record
@@ -13,10 +14,12 @@ _client: QdrantClient | None = None
 def get_client() -> QdrantClient:
     global _client
     if _client is None:
-        _client = QdrantClient(
-            url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key or None,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            _client = QdrantClient(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key or None,
+            )
     return _client
 
 
