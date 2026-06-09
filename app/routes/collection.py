@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.schemas.collection_schema import (
     GetAllResponse, PointPayload,
     DeleteResponse, UpdateResponse,
-    UpdateQuestionSQL, UpdateDDL, UpdateDocs,
+    UpdateQuestionSQL, UpdateDDL, UpdateDocs, UpdateGlossary,
 )
 from app.services.qdrant_service import get_all_points, update_point_payload, delete_point
 from app.services.embedding_service import get_embedding
@@ -156,5 +156,52 @@ async def delete_docs(point_id: str):
         delete_point(settings.qdrant_docs_collection_name, point_id)
         logger.info("Deleted docs point: %s", point_id)
         return DeleteResponse(id=point_id, message="Documentation record deleted.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Glossary collection
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/glossary", response_model=GetAllResponse)
+async def get_all_glossary(limit: int = Query(500, le=2000)):
+    try:
+        records = get_all_points(settings.qdrant_glossary_collection_name, limit=limit)
+        return _to_response(records)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/glossary/{point_id}", response_model=UpdateResponse)
+async def update_glossary(point_id: str, body: UpdateGlossary):
+    try:
+        embed_text = f"{body.term} {body.meaning}"
+        embedding = get_embedding(embed_text)
+        payload = {
+            "term": body.term,
+            "meaning": body.meaning,
+            "sql_hint": body.sql_hint,
+            "category": body.category,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        from app.services.qdrant_service import get_client
+        from qdrant_client.models import PointStruct
+        get_client().upsert(
+            collection_name=settings.qdrant_glossary_collection_name,
+            points=[PointStruct(id=point_id, vector=embedding, payload=payload)],
+        )
+        logger.info("Updated glossary point: %s", point_id)
+        return UpdateResponse(id=point_id, message="Glossary record updated.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/glossary/{point_id}", response_model=DeleteResponse)
+async def delete_glossary(point_id: str):
+    try:
+        delete_point(settings.qdrant_glossary_collection_name, point_id)
+        logger.info("Deleted glossary point: %s", point_id)
+        return DeleteResponse(id=point_id, message="Glossary record deleted.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

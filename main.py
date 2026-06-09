@@ -7,6 +7,7 @@ from app.routes import qdrant
 from app.routes import training
 from app.routes import collection
 from app.routes import execute
+from app.routes import glossary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,9 +29,14 @@ async def lifespan(app: FastAPI):
     logger.info("Embedding model loaded successfully.")
 
     logger.info("Connecting to Qdrant...")
-    from app.services.qdrant_service import get_client
+    from app.services.qdrant_service import get_client, ensure_collection
     get_client()
     logger.info("Qdrant client connected successfully.")
+
+    logger.info("Ensuring glossary collection exists...")
+    from app.config import get_settings as _gs
+    ensure_collection(_gs().qdrant_glossary_collection_name)
+    logger.info("Glossary collection ready.")
 
     logger.info("Loading re-ranker model...")
     from app.services.reranker_service import get_reranker
@@ -66,6 +72,7 @@ app.include_router(qdrant.router)
 app.include_router(training.router)
 app.include_router(collection.router)
 app.include_router(execute.router)
+app.include_router(glossary.router)
 
 
 @app.get("/")

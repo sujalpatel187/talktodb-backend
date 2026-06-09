@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     qdrant_collection_name: str
     qdrant_ddl_collection_name: str
     qdrant_docs_collection_name: str
+    qdrant_glossary_collection_name: str
     qdrant_api_key: str | None = None
 
     # Embeddings — REQUIRED

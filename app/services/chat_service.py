@@ -5,6 +5,7 @@ from pathlib import Path
 from app.services.embedding_service import get_embedding
 from app.services.qdrant_service import search_similar, search_ddl, search_docs
 from app.services.reranker_service import rerank_sync, bm25_prefilter, RerankedHit
+from app.services.glossary_service import resolve_glossary, GlossaryResolutionResult
 from app.services.llm_service import call_llm, call_llm_summary, _load_system_prompt
 from app.services.sql_validator import validate_sql
 from app.services.input_sanitizer import sanitize_user_message
@@ -33,6 +34,7 @@ def _save_prompt_log(user_message: str, prompt: str) -> None:
 
 def _save_retrieval_debug_log(
     user_message: str,
+    glossary_result: GlossaryResolutionResult,
     qa_hits: list,
     ddl_hits: list,
     docs_hits: list,
@@ -52,6 +54,20 @@ def _save_retrieval_debug_log(
     lines = []
     lines.append(f"USER QUESTION: {user_message}")
     lines.append("=" * 80)
+
+    # ── Section 0: Glossary Resolution ───────────────────────────────────
+    lines.append(f"\n{'=' * 80}")
+    lines.append(f"SECTION 0 — GLOSSARY RESOLUTION ({len(glossary_result.matches)} terms matched)")
+    lines.append("=" * 80)
+    if glossary_result.matches:
+        for m in glossary_result.matches:
+            lines.append(
+                f"  score={m.score:.4f} | {m.term} = {m.meaning}"
+                + (f" | sql_hint: {m.sql_hint}" if m.sql_hint else "")
+            )
+        lines.append(f"\nEXPANDED QUERY:\n{glossary_result.expanded_query}")
+    else:
+        lines.append("  (no glossary terms matched — using original query)")
 
     # ── Section 1: Raw QA candidates from Qdrant ────────────────────────────
     lines.append(f"\n{'=' * 80}")
@@ -162,8 +178,15 @@ def run_chat_pipeline(user_message: str) -> ChatResponse:
         logger.warning("Input sanitization failed: %s", error_msg)
         return ChatResponse(userMessage=user_message, error=error_msg)
 
-    # Step 1: Embed user message
-    query_vector = get_embedding(user_message)
+    # Step 0b: Business Glossary Resolution
+    # Expands acronyms/abbreviations before embedding so all downstream
+    # retrieval (QA, DDL, Docs) benefits from the richer query text.
+    logger.info("=== Glossary Resolution ===")
+    glossary_result: GlossaryResolutionResult = resolve_glossary(user_message)
+    expanded_query: str = glossary_result.expanded_query
+
+    # Step 1: Embed expanded query (falls back to original if no matches)
+    query_vector = get_embedding(expanded_query)
 
     # Step 2: Retrieve candidates
     # QA:  50 candidates — CrossEncoder selects best 10
@@ -213,6 +236,7 @@ def run_chat_pipeline(user_message: str) -> ChatResponse:
     # QA: re-ranked top-10  |  DDL: re-ranked top-5  |  Docs: direct Qdrant top-5
     _save_retrieval_debug_log(
         user_message=user_message,
+        glossary_result=glossary_result,
         qa_hits=qa_hits,
         ddl_hits=ddl_hits,
         docs_hits=docs_hits,

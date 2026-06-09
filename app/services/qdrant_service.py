@@ -1,12 +1,17 @@
 import uuid
+import logging
 import warnings
 from datetime import datetime, timezone
 from qdrant_client import QdrantClient
-from qdrant_client.models import ScoredPoint, PointStruct, Record
+from qdrant_client.models import (
+    ScoredPoint, PointStruct, Record,
+    VectorParams, Distance,
+)
 from typing import List, Optional
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 _client: QdrantClient | None = None
 
@@ -21,6 +26,33 @@ def get_client() -> QdrantClient:
                 api_key=settings.qdrant_api_key or None,
             )
     return _client
+
+
+def ensure_collection(collection_name: str, vector_size: int | None = None) -> bool:
+    """Create *collection_name* if it does not already exist.
+
+    Args:
+        collection_name: Name of the Qdrant collection to verify / create.
+        vector_size:     Embedding dimension.  Defaults to
+                         ``settings.embedding_dimension``.
+
+    Returns:
+        ``True`` if the collection was created, ``False`` if it already existed.
+    """
+    client = get_client()
+    dim = vector_size or settings.embedding_dimension
+
+    existing = {c.name for c in client.get_collections().collections}
+    if collection_name in existing:
+        logger.info("Collection already exists: %s", collection_name)
+        return False
+
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+    )
+    logger.info("Collection created: %s  (dim=%d, metric=cosine)", collection_name, dim)
+    return True
 
 
 def search_similar(
@@ -68,6 +100,21 @@ def search_docs(query_vector: List[float], top_k: int = 5) -> List[ScoredPoint]:
         collection_name=settings.qdrant_docs_collection_name,
         query_vector=query_vector,
         limit=top_k,
+    )
+
+
+def search_glossary(
+    query_vector: List[float],
+    top_k: int = 5,
+    score_threshold: float = 0.0,
+) -> List[ScoredPoint]:
+    """Search the business glossary collection for matching terms."""
+    client = get_client()
+    return client.search(
+        collection_name=settings.qdrant_glossary_collection_name,
+        query_vector=query_vector,
+        limit=top_k,
+        score_threshold=score_threshold,
     )
 
 

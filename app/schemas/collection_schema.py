@@ -38,3 +38,10 @@ class UpdateDDL(BaseModel):
 class UpdateDocs(BaseModel):
     content: str
     category: str
+
+
+class UpdateGlossary(BaseModel):
+    term: str
+    meaning: str
+    sql_hint: str = ""
+    category: str = "business_term"
