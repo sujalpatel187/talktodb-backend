@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import string
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 from qdrant_client.models import ScoredPoint
 
@@ -112,6 +114,83 @@ def _extract_document_text(hit: ScoredPoint, source: str) -> str:
 
     # Generic fallback — concatenate all non-empty string values
     return " ".join(str(v) for v in payload.values() if v)
+
+
+# ---------------------------------------------------------------------------
+# BM25 helpers
+# ---------------------------------------------------------------------------
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, strip punctuation, split on whitespace.
+
+    Simple but effective for DDL text which is rich in identifiers.
+    """
+    text = text.lower().translate(str.maketrans("", "", string.punctuation))
+    return text.split()
+
+
+def bm25_prefilter(
+    query: str,
+    candidates: list[tuple[ScoredPoint, str]],
+    top_n: int = 20,
+) -> list[tuple[ScoredPoint, str]]:
+    """Narrow *candidates* to the *top_n* most keyword-relevant using BM25Okapi.
+
+    Intended as a **fast pre-filter** before CrossEncoder re-ranking.
+    BM25 runs entirely in CPU RAM with no model weights — latency is
+    microseconds even for hundreds of candidates.
+
+    Typical DDL pipeline::
+
+        Qdrant (top 100) → BM25 pre-filter (top 20) → CrossEncoder (top 5)
+
+    Args:
+        query:      The user's natural-language question.
+        candidates: List of ``(ScoredPoint, source)`` tuples.
+        top_n:      Maximum number of candidates to keep.
+
+    Returns:
+        A subset of *candidates* (≤ *top_n*), sorted by BM25 score descending.
+        If *candidates* already has ≤ *top_n* items the list is returned as-is.
+    """
+    if len(candidates) <= top_n:
+        return candidates
+
+    # Build a tokenised corpus from each candidate's document text
+    corpus: list[list[str]] = [
+        _tokenize(_extract_document_text(hit, source))
+        for hit, source in candidates
+    ]
+    query_tokens: list[str] = _tokenize(query)
+
+    bm25 = BM25Okapi(corpus)
+    scores: np.ndarray = bm25.get_scores(query_tokens)
+
+    # Pair each score with its original candidate, sort descending, take top-n
+    scored = sorted(
+        zip(scores.tolist(), candidates),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    top = [cand for _, cand in scored[:top_n]]
+
+    logger.info(
+        "BM25 pre-filter: %d → %d candidates  "
+        "(top score=%.4f, bottom score=%.4f)",
+        len(candidates),
+        len(top),
+        scored[0][0],
+        scored[top_n - 1][0],
+    )
+    for rank, (score, (hit, source)) in enumerate(scored[:top_n], 1):
+        logger.debug(
+            "  [BM25 %2d] score=%.4f  source=%s  table=%s",
+            rank,
+            score,
+            source,
+            (hit.payload or {}).get("table_name", ""),
+        )
+
+    return top
 
 
 # ---------------------------------------------------------------------------

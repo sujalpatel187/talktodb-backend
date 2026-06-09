@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from app.services.embedding_service import get_embedding
 from app.services.qdrant_service import search_similar, search_ddl, search_docs
-from app.services.reranker_service import rerank_sync, RerankedHit
+from app.services.reranker_service import rerank_sync, bm25_prefilter, RerankedHit
 from app.services.llm_service import call_llm, call_llm_summary, _load_system_prompt
 from app.services.sql_validator import validate_sql
 from app.services.input_sanitizer import sanitize_user_message
@@ -36,9 +36,13 @@ def _save_retrieval_debug_log(
     qa_hits: list,
     ddl_hits: list,
     docs_hits: list,
-    reranked: list,
+    reranked_qa: list,
+    reranked_ddl: list,
 ) -> None:
-    """Write a human-readable debug file with raw candidates and re-ranked results."""
+    """Write a human-readable debug file with raw candidates and re-ranked results.
+
+    Docs are logged as-is (no re-ranking applied).
+    """
     _LOGS_DIR.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = re.sub(r"[^\w\s-]", "", user_message).strip()
@@ -55,74 +59,53 @@ def _save_retrieval_debug_log(
     lines.append("=" * 80)
     for i, hit in enumerate(qa_hits, 1):
         lines.append(
-            f"[{i:>2}] score={hit.score:.4f} | "
-            f"question={hit.payload.get('question', '')} | "
-            
+            f"[{i:>2}] qdrant={hit.score:.4f} | "
+            f"question={hit.payload.get('question', '')}"
         )
 
     # ── Section 2: Raw DDL candidates from Qdrant ───────────────────────────
     lines.append(f"\n{'=' * 80}")
-    lines.append(f"SECTION 2 — RAW DDL CANDIDATES FROM QDRANT ({len(ddl_hits)} results)")
+    lines.append(f"SECTION 2 — RAW DDL CANDIDATES FROM QDRANT ({len(ddl_hits)} results) [BM25 pre-filter applied before CrossEncoder]")
     lines.append("=" * 80)
     for i, hit in enumerate(ddl_hits, 1):
         lines.append(
-            f"[{i:>2}] score={hit.score:.4f} | "
+            f"[{i:>2}] qdrant={hit.score:.4f} | "
             f"table={hit.payload.get('table_name', '')} | "
-            f"description={hit.payload.get('description', '')} | "
-            f"ddl={hit.payload.get('ddl', '')}"
+            f"description={hit.payload.get('description', '')}"
         )
 
-    # ── Section 3: Raw Docs candidates from Qdrant ──────────────────────────
+    # ── Section 3: Docs from Qdrant (sent directly to LLM) ──────────────────
     lines.append(f"\n{'=' * 80}")
-    lines.append(f"SECTION 3 — RAW DOCS CANDIDATES FROM QDRANT ({len(docs_hits)} results)")
+    lines.append(f"SECTION 3 — DOCS FROM QDRANT → SENT DIRECTLY TO LLM ({len(docs_hits)} results)")
     lines.append("=" * 80)
     for i, hit in enumerate(docs_hits, 1):
         lines.append(
-            f"[{i:>2}] score={hit.score:.4f} | "
+            f"[{i:>2}] qdrant={hit.score:.4f} | "
             f"category={hit.payload.get('category', '')} | "
             f"content={hit.payload.get('content', '')}"
         )
 
     # ── Section 4: Re-ranked QA sent to LLM ─────────────────────────────────
-    reranked_qa_items = [r for r in reranked if r.source == "qa"]
     lines.append(f"\n{'=' * 80}")
-    lines.append(
-        f"SECTION 4 — RE-RANKED QA SENT TO LLM ({len(reranked_qa_items)} results)"
-    )
+    lines.append(f"SECTION 4 — RE-RANKED QA SENT TO LLM ({len(reranked_qa)} results)")
     lines.append("=" * 80)
-    for i, r in enumerate(reranked_qa_items, 1):
+    for i, r in enumerate(reranked_qa, 1):
         lines.append(
-            f"[{i:>2}] rerank={r.rerank_score:.4f} | "
+            f"[{i:>2}] qdrant={r.hit.score:.4f} | rerank={r.rerank_score:.4f} | "
             f"question={r.hit.payload.get('question', '')} | "
+            f"sql={r.hit.payload.get('sql', '')}"
         )
 
     # ── Section 5: Re-ranked DDL sent to LLM ────────────────────────────────
-    reranked_ddl_items = [r for r in reranked if r.source == "ddl"]
     lines.append(f"\n{'=' * 80}")
-    lines.append(
-        f"SECTION 5 — RE-RANKED DDL SENT TO LLM ({len(reranked_ddl_items)} results)"
-    )
+    lines.append(f"SECTION 5 — RE-RANKED DDL SENT TO LLM ({len(reranked_ddl)} results)")
     lines.append("=" * 80)
-    for i, r in enumerate(reranked_ddl_items, 1):
+    for i, r in enumerate(reranked_ddl, 1):
         lines.append(
-            f"[{i:>2}] rerank={r.rerank_score:.4f} | "
+            f"[{i:>2}] qdrant={r.hit.score:.4f} | rerank={r.rerank_score:.4f} | "
             f"table={r.hit.payload.get('table_name', '')} | "
             f"description={r.hit.payload.get('description', '')} | "
             f"ddl={r.hit.payload.get('ddl', '')}"
-        )
-
-    # ── Section 6: Re-ranked Docs sent to LLM ───────────────────────────────
-    reranked_docs_items = [r for r in reranked if r.source == "docs"]
-    lines.append(f"\n{'=' * 80}")
-    lines.append(
-        f"SECTION 6 — RE-RANKED DOCS SENT TO LLM ({len(reranked_docs_items)} results)"
-    )
-    lines.append("=" * 80)
-    for i, r in enumerate(reranked_docs_items, 1):
-        lines.append(
-            f"[{i:>2}] rerank={r.rerank_score:.4f} | "
-            f"category={r.hit.payload.get('category', '')} | "
-            f"content={r.hit.payload.get('content', '')}"
         )
 
     file_path.write_text("\n".join(lines), encoding="utf-8")
@@ -182,100 +165,63 @@ def run_chat_pipeline(user_message: str) -> ChatResponse:
     # Step 1: Embed user message
     query_vector = get_embedding(user_message)
 
-    # Step 2: Retrieve candidates for re-ranking
-    # QA: 50 candidates — widest net, re-ranker will select best 10
-    # DDL / Docs: 10 candidates each
+    # Step 2: Retrieve candidates
+    # QA:  50 candidates — CrossEncoder selects best 10
+    # DDL: 100 candidates — BM25 pre-filter →20, then CrossEncoder selects best 5
+    # Docs: top-5 — passed directly to LLM (no re-ranking)
     qa_hits = search_similar(query_vector=query_vector, top_k=50)
-    ddl_hits = search_ddl(query_vector=query_vector, top_k=10)
-    docs_hits = search_docs(query_vector=query_vector, top_k=10)
+    ddl_hits = search_ddl(query_vector=query_vector, top_k=100)
+    docs_hits = search_docs(query_vector=query_vector, top_k=5)
 
     logger.info(
-        "Qdrant candidates: %d QA, %d DDL, %d Docs (total %d)",
+        "Qdrant candidates: %d QA (re-rank→10), %d DDL (BM25→20→CE→5), %d Docs (direct)",
         len(qa_hits), len(ddl_hits), len(docs_hits),
-        len(qa_hits) + len(ddl_hits) + len(docs_hits),
     )
 
-    # logger.info("=== Raw Qdrant Candidates (before re-ranking) ===")
-    # for i, hit in enumerate(qa_hits, 1):
-    #     logger.info(
-    #         "[QA  %2d] score=%.4f | question=%s",
-    #         i, hit.score,
-    #         hit.payload.get("question", ""),
-    #         # hit.payload.get("sql", ""),
-    #     )
-    # for i, hit in enumerate(ddl_hits, 1):
-    #     logger.info(
-    #         "[DDL %2d] score=%.4f | table=%s | ddl=%s",
-    #         i, hit.score,
-    #         hit.payload.get("table_name", ""),
-    #         hit.payload.get("ddl", ""),
-    #     )
-    # for i, hit in enumerate(docs_hits, 1):
-    #     logger.info(
-    #         "[DOC %2d] score=%.4f | category=%s | content=%s",
-    #         i, hit.score,
-    #         hit.payload.get("category", ""),
-    #         hit.payload.get("content", ""),
-    #     )
-
-    # Step 2b: Cross-encoder re-ranking — score all 30 candidates together
-    # and return the top-10 most relevant across all collections.
-    candidates = (
-        [(hit, "qa") for hit in qa_hits]
-        + [(hit, "ddl") for hit in ddl_hits]
-        + [(hit, "docs") for hit in docs_hits]
+    # Step 2b: Cross-encoder re-ranking — QA
+    qa_candidates = [(hit, "qa") for hit in qa_hits]
+    reranked_qa_hits: list[RerankedHit] = rerank_sync(
+        query=user_message, candidates=qa_candidates, top_k=10
     )
-    reranked: list[RerankedHit] = rerank_sync(
-        query=user_message, candidates=candidates, top_k=10
+    reranked_qa = [r.hit for r in reranked_qa_hits]
+
+    # Step 2c: DDL — BM25 pre-filter (100 → 20) then CrossEncoder (20 → 5)
+    ddl_candidates = [(hit, "ddl") for hit in ddl_hits]
+    ddl_bm25_candidates = bm25_prefilter(
+        query=user_message, candidates=ddl_candidates, top_n=20
     )
+    reranked_ddl_hits: list[RerankedHit] = rerank_sync(
+        query=user_message, candidates=ddl_bm25_candidates, top_k=5
+    )
+    reranked_ddl = [r.hit for r in reranked_ddl_hits]
 
-    # Partition reranked results back by source for the existing block builders
-    reranked_qa = [r.hit for r in reranked if r.source == "qa"]
-    reranked_ddl = [r.hit for r in reranked if r.source == "ddl"]
-    reranked_docs = [r.hit for r in reranked if r.source == "docs"]
+    logger.info(
+        "Re-ranking complete: QA %d→%d | DDL %d→BM25→%d→CE→%d",
+        len(qa_hits), len(reranked_qa),
+        len(ddl_hits), len(ddl_bm25_candidates), len(reranked_ddl),
+    )
+    for i, r in enumerate(reranked_ddl_hits, 1):
+        logger.info(
+            "[DDL %2d] qdrant=%.4f rerank=%.4f | table=%s",
+            i,
+            r.hit.score,
+            r.rerank_score,
+            r.hit.payload.get("table_name", ""),
+        )
 
-    # logger.info("=== Re-ranked Q&A Results (top %d) ===", len(reranked_qa))
-    # for i, r in enumerate(
-    #     (r for r in reranked if r.source == "qa"), 1
-    # ):
-    #     logger.info(
-    #         "[%d] Rerank: %.4f | Question: %s | SQL: %s",
-    #         i, r.rerank_score,
-    #         r.hit.payload.get("question", ""),
-    #         r.hit.payload.get("sql", ""),
-    #     )
-
-    # logger.info("=== Re-ranked DDL Results (top %d) ===", len(reranked_ddl))
-    # for i, r in enumerate(
-    #     (r for r in reranked if r.source == "ddl"), 1
-    # ):
-    #     logger.info(
-    #         "[%d] Rerank: %.4f | Table: %s",
-    #         i, r.rerank_score,
-    #         r.hit.payload.get("table_name", ""),
-    #     )
-
-    # logger.info("=== Re-ranked Docs Results (top %d) ===", len(reranked_docs))
-    # for i, r in enumerate(
-    #     (r for r in reranked if r.source == "docs"), 1
-    # ):
-    #     logger.info(
-    #         "[%d] Rerank: %.4f | Category: %s",
-    #         i, r.rerank_score,
-    #         r.hit.payload.get("category", ""),
-    #     )
-
-    # Step 3: Build context blocks for LLM from re-ranked hits
+    # Step 3: Build context blocks for LLM
+    # QA: re-ranked top-10  |  DDL: re-ranked top-5  |  Docs: direct Qdrant top-5
     _save_retrieval_debug_log(
         user_message=user_message,
         qa_hits=qa_hits,
         ddl_hits=ddl_hits,
         docs_hits=docs_hits,
-        reranked=reranked,
+        reranked_qa=reranked_qa_hits,
+        reranked_ddl=reranked_ddl_hits,
     )
     qa_block = _build_qa_block(reranked_qa)
     ddl_block = _build_ddl_block(reranked_ddl)
-    docs_block = _build_docs_block(reranked_docs)
+    docs_block = _build_docs_block(docs_hits)
 
     user_prompt = (
         f"Question: {user_message}\n\n"
