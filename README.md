@@ -6,9 +6,11 @@
   <img src="https://img.shields.io/badge/Qdrant-1.13.3-FF007F?style=for-the-badge&logo=qdrant&logoColor=white" alt="Qdrant" />
   <img src="https://img.shields.io/badge/PostgreSQL-15+-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/CrossEncoder-BAAI%2Fbge--reranker--base-FF6B35?style=for-the-badge&logo=huggingface&logoColor=white" alt="CrossEncoder" />
+  <img src="https://img.shields.io/badge/SQLGlot-AST%20Validation-4B8BBE?style=for-the-badge&logo=python&logoColor=white" alt="SQLGlot" />
+  <img src="https://img.shields.io/badge/Device-CPU%20Only-lightgrey?style=for-the-badge&logo=intel&logoColor=white" alt="CPU Only" />
 </p>
 
-A state-of-the-art FastAPI backend designed to translate natural language user questions into safe, optimized SQL queries and execute them against a PostgreSQL database. It leverages semantic search over schemas and documentation via **Qdrant**, a **Cross-Encoder re-ranking stage** for retrieval precision, and advanced text generation using an OpenAI-compatible large language model (e.g., vLLM, Ollama).
+A state-of-the-art FastAPI backend designed to translate natural language user questions into safe, optimized SQL queries and execute them against a PostgreSQL database. It leverages semantic search over schemas and documentation via **Qdrant**, a **Cross-Encoder re-ranking stage** for retrieval precision, **SQLGlot AST-based SQL validation** for production-grade safety, and advanced text generation using an OpenAI-compatible large language model (e.g., vLLM, Ollama). All ML inference (embeddings and re-ranking) runs on **CPU** with no GPU requirement.
 
 ---
 
@@ -63,7 +65,9 @@ The backend employs a multi-stage, defense-in-depth pipeline to ensure that only
                        │
                        ▼
             ┌──────────────────────┐
-            │    SQL Validator     │  ◄── Enforces SELECT-only validation
+            │    SQL Validator     │  ◄── SQLGlot AST validation
+            │  (sql_validator_     │      SELECT-only · complexity · schema
+            │   service.py)        │      hallucination detection
             └──────────┬───────────┘
                        │
                        ▼
@@ -117,13 +121,14 @@ backend/
 │   │
 │   └── services/
 │       ├── chat_service.py         # Main pipeline flow coordinator
-│       ├── embedding_service.py    # SentenceTransformers bi-encoder (all-MiniLM-L6-v2)
-│       ├── reranker_service.py     # Cross-encoder re-ranking + BM25 pre-filter
-│       ├── glossary_service.py     # Business glossary resolution & query expansion
-│       ├── qdrant_service.py       # Vector DB interaction (CRUD + search)
-│       ├── llm_service.py          # OpenAI-compatible API connector
-│       ├── pg_service.py           # PostgreSQL transactional query execution
-│       ├── sql_validator.py        # Strict AST/regex-based SQL checks
+       ├── embedding_service.py    # SentenceTransformers bi-encoder (all-MiniLM-L6-v2, CPU)
+       ├── reranker_service.py     # Cross-encoder re-ranking + BM25 pre-filter (CPU)
+       ├── glossary_service.py     # Business glossary resolution & query expansion
+       ├── qdrant_service.py       # Vector DB interaction (CRUD + search)
+       ├── llm_service.py          # OpenAI-compatible API connector
+       ├── pg_service.py           # PostgreSQL execution + schema metadata cache
+       ├── sql_validator_service.py # SQLGlot AST validation pipeline
+       ├── sql_validator.py        # Legacy regex SELECT guard (kept for /execute fallback)
 │       └── input_sanitizer.py      # Input sanitation & prompt injection defense
 │
 └── logs/                           # Auto-generated audit trail per request
@@ -227,11 +232,11 @@ QDRANT_DOCS_COLLECTION_NAME=your_docs_collection
 QDRANT_GLOSSARY_COLLECTION_NAME=your_glossary_collection
 QDRANT_API_KEY=
 
-# Embedding Model settings
+# Embedding Model settings (CPU inference — no GPU required)
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 EMBEDDING_DIMENSION=384
 
-# Re-Ranking Model (optional — defaults to BAAI/bge-reranker-base)
+# Re-Ranking Model (CPU inference — optional, defaults to BAAI/bge-reranker-base)
 RERANKER_MODEL=BAAI/bge-reranker-base
 
 # LLM Configurations
@@ -247,6 +252,14 @@ PG_PORT=5432
 PG_DATABASE=my_production_db
 PG_USER=talktodb_readonly
 PG_PASSWORD=secure_password_here
+
+# SQLGlot SQL Validation (all optional — defaults shown)
+# SQL_MAX_QUERY_LENGTH=8000         # Max character length of generated SQL
+# SQL_MAX_JOINS=10                  # Max JOIN clauses allowed per query
+# SQL_MAX_SUBQUERIES=5              # Max nested subqueries allowed
+# SQL_AUTO_LIMIT=0                  # 0 = disabled; set e.g. 500 to auto-inject LIMIT
+# SQL_SCHEMA_VALIDATION_ENABLED=true  # Toggle hallucination detection on/off
+# SQL_SCHEMA_CACHE_TTL=300          # Seconds to cache DB schema metadata
 ```
 
 > [!IMPORTANT]
@@ -373,3 +386,30 @@ Question: List all branches with more than 50 employees.
 ## 🎨 System Prompt Tuning
 
 Modify [app/prompts/system_prompt.txt](app/prompts/system_prompt.txt) to adapt the LLM's query generation style. This file is read **dynamically on every request**, enabling on-the-fly tuning without restarting the server!
+
+---
+
+## 🖥️ CPU-Only Inference
+
+All ML models run on **CPU** — no GPU is required:
+
+| Model | Service | How pinned |
+|:---|:---|:---|
+| `all-MiniLM-L6-v2` (bi-encoder) | `embedding_service.py` | `SentenceTransformer(..., device="cpu")` |
+| `BAAI/bge-reranker-base` (cross-encoder) | `reranker_service.py` | `CrossEncoder(..., device="cpu")` |
+
+Both models are loaded **once at startup** and kept as module-level singletons for the lifetime of the process.
+
+---
+
+## 🗃️ Schema Metadata & Hallucination Detection
+
+`pg_service.fetch_schema_metadata()` builds a `{table: [columns]}` whitelist used by the SQLGlot validator. It queries **both** `information_schema.columns` and `pg_catalog` to cover:
+
+| Object type | Source |
+|:---|:---|
+| Regular tables | `information_schema.columns` |
+| Plain views | `information_schema.columns` |
+| **Materialized views** | `pg_class WHERE relkind = 'm'` |
+
+Results are cached in memory for `SQL_SCHEMA_CACHE_TTL` seconds (default 300 s / 5 min). The cache is rebuilt on server restart. If the database is unreachable during a refresh, the last successful (stale) cache is returned so validation can still proceed.
