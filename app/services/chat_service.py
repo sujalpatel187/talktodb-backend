@@ -7,12 +7,14 @@ from app.services.qdrant_service import search_similar, search_ddl, search_docs
 from app.services.reranker_service import rerank_sync, bm25_prefilter, RerankedHit
 from app.services.glossary_service import resolve_glossary, GlossaryResolutionResult
 from app.services.llm_service import call_llm, call_llm_summary, _load_system_prompt
-from app.services.sql_validator import validate_sql
+from app.services.sql_validator_service import validate_sql, ValidationResult
 from app.services.input_sanitizer import sanitize_user_message
-from app.services.pg_service import execute_query
+from app.services.pg_service import execute_query, fetch_schema_metadata
 from app.schemas.chat_schema import ChatResponse
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 _LOGS_DIR = Path(__file__).parent.parent.parent / "logs"
 
@@ -264,20 +266,42 @@ def run_chat_pipeline(user_message: str) -> ChatResponse:
     logger.info("=== Generated SQL ===")
     logger.info("%s", generated_sql.strip())
 
-    # Step 5: Validate SQL is SELECT-only
-    is_valid, error_msg = validate_sql(generated_sql)
-    if not is_valid:
-        logger.warning("SQL validation failed: %s", error_msg)
-        return ChatResponse(userMessage=user_message, error=error_msg)
+    # Step 5: SQLGlot validation — SELECT-only, complexity, schema, auto-LIMIT
+    schema_metadata: dict[str, list[str]] | None = None
+    if settings.sql_schema_validation_enabled:
+        schema_metadata = fetch_schema_metadata()
 
-    # Step 6: Execute SQL against PostgreSQL
-    db_result = execute_query(generated_sql.strip())
+    validation: ValidationResult = validate_sql(
+        generated_sql,
+        schema_metadata=schema_metadata,
+        max_joins=settings.sql_max_joins,
+        max_subqueries=settings.sql_max_subqueries,
+        max_query_length=settings.sql_max_query_length,
+        auto_limit=settings.sql_auto_limit,
+    )
+
+    if not validation.is_valid:
+        error_detail = " | ".join(validation.errors)
+        logger.warning("SQL validation failed: %s", error_detail)
+        return ChatResponse(userMessage=user_message, error=error_detail)
+
+    # Use the validated (and potentially LIMIT-injected) SQL for execution
+    final_sql = validation.final_sql
+    logger.info(
+        "Validation passed. Tables=%s | Columns=%s | Final SQL: %s",
+        validation.tables,
+        validation.columns,
+        final_sql[:200],
+    )
+
+    # Step 6: Execute validated SQL against PostgreSQL
+    db_result = execute_query(final_sql)
 
     if db_result["error"]:
         logger.warning("SQL execution error: %s", db_result["error"])
         return ChatResponse(
             userMessage=f"Database execution failed: {db_result['error']}",
-            generatedSQL=generated_sql.strip(),
+            generatedSQL=final_sql,
             error=db_result["error"],
         )
 
@@ -290,7 +314,7 @@ def run_chat_pipeline(user_message: str) -> ChatResponse:
     # Step 7: Generate conversational NL summary
     summary = _generate_data_summary(
         question=user_message,
-        sql=generated_sql.strip(),
+        sql=final_sql,
         columns=db_result["columns"],
         rows=db_result["rows"],
     )
@@ -298,7 +322,7 @@ def run_chat_pipeline(user_message: str) -> ChatResponse:
     # Step 8: Build response
     return ChatResponse(
         userMessage=summary,
-        generatedSQL=generated_sql.strip(),
+        generatedSQL=final_sql,
         columns=db_result["columns"],
         rows=db_result["rows"],
         rowCount=db_result["row_count"],

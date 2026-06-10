@@ -8,3 +8,4 @@ sentence-transformers==3.4.1
 rank-bm25==0.2.2
 httpx==0.28.1
 psycopg2-binary==2.9.10
+sqlglot>=23.0.0

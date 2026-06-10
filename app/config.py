@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     pg_user: str
     pg_password: str
 
+    # SQL Validation (SQLGlot)
+    sql_max_query_length: int = 8000
+    sql_max_joins: int = 10
+    sql_max_subqueries: int = 5
+    sql_auto_limit: int = 0  # 0 = disabled; set to e.g. 500 to auto-inject LIMIT
+    sql_schema_validation_enabled: bool = True
+    sql_schema_cache_ttl: int = 300  # seconds
+
     class Config:
         env_file = ".env"
 

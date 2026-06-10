@@ -222,7 +222,7 @@ def get_reranker() -> CrossEncoder:
     for model_name in candidates:
         try:
             logger.info("Loading re-ranker model: %s", model_name)
-            _reranker = CrossEncoder(model_name, max_length=_MAX_LENGTH)
+            _reranker = CrossEncoder(model_name, max_length=_MAX_LENGTH, device="cpu")
             logger.info("Re-ranker model loaded successfully: %s", model_name)
             return _reranker
         except Exception as exc:  # noqa: BLE001

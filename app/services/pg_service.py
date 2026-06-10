@@ -1,4 +1,5 @@
 import logging
+import time
 import psycopg2
 import psycopg2.extras
 from app.config import get_settings
@@ -122,3 +123,93 @@ def _make_serializable(value):
         return value
     # datetime, date, Decimal, etc.
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Schema metadata cache
+# ---------------------------------------------------------------------------
+
+_schema_cache: dict[str, list[str]] = {}
+_schema_cache_ts: float = 0.0
+
+
+def fetch_schema_metadata(ttl: float | None = None) -> dict[str, list[str]]:
+    """Fetch table→column metadata from ``information_schema.columns``.
+
+    Returns a dict mapping lowercase table names to a list of lowercase
+    column names (in ordinal order).  Results are cached for *ttl* seconds
+    (defaults to ``settings.sql_schema_cache_ttl``, which is 300 s / 5 min).
+
+    On failure the last successful (possibly stale) cache is returned so that
+    a transient DB error never breaks the validation pipeline.
+    """
+    global _schema_cache, _schema_cache_ts
+
+    effective_ttl = ttl if ttl is not None else float(settings.sql_schema_cache_ttl)
+    now = time.monotonic()
+
+    if _schema_cache and (now - _schema_cache_ts) < effective_ttl:
+        logger.debug(
+            "Schema metadata served from cache (%d tables).", len(_schema_cache)
+        )
+        return _schema_cache
+
+    logger.info("Fetching schema metadata from information_schema …")
+    query = """
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+
+        UNION ALL
+
+        SELECT
+            mv.relname          AS table_name,
+            attr.attname        AS column_name
+        FROM pg_class mv
+        JOIN pg_attribute attr ON attr.attrelid = mv.oid
+        JOIN pg_namespace ns   ON ns.oid = mv.relnamespace
+        WHERE mv.relkind  = 'm'
+          AND ns.nspname  = 'public'
+          AND attr.attnum > 0
+          AND NOT attr.attisdropped
+
+        ORDER BY table_name, column_name
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        metadata: dict[str, list[str]] = {}
+        for table_name, column_name in rows:
+            key = table_name.lower()
+            if key not in metadata:
+                metadata[key] = []
+            metadata[key].append(column_name.lower())
+
+        _schema_cache = metadata
+        _schema_cache_ts = now
+
+        logger.info(
+            "Schema metadata loaded: %d table(s), %d total column(s).",
+            len(metadata),
+            sum(len(v) for v in metadata.values()),
+        )
+        return metadata
+
+    except Exception as exc:
+        logger.error("Failed to fetch schema metadata: %s", str(exc))
+        # Return stale cache if available so validation can still proceed.
+        return _schema_cache
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.close()
